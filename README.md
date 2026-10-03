@@ -1,6 +1,5 @@
 # JHWML
-
-Windows launcher and mod framework for Steam **Happy Wheels 1.99.2**.
+Linux launcher and mod framework for Steam **Happy Wheels 1.99.2**.
 
 Created by Jimbob · [Join Discord](https://discord.gg/XcZePBgDBJ)
 
