@@ -2,7 +2,8 @@
 """JHWML - Linux Installer (Fixed)
 
 Installs the JHWML mod loader into the Linux Happy Wheels 1.99.2 installation.
-Uses in-place ASAR patching to preserve unpacked node_modules and Steam APIs.
+Uses the ASAR extraction/packing flow so unpacked node_modules and Steam runtime
+binaries are preserved correctly.
 
 Usage:
   python3 linux_install.py                    # Auto-detect game folder
@@ -13,10 +14,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import pathlib
 import shutil
-import struct
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -26,13 +26,20 @@ CORE_DIR = ROOT / "core"
 VERSION = "0.2.2"
 
 
+def ensure_asar_cli() -> None:
+    """Require the `asar` CLI, which preserves unpacked native modules."""
+    if shutil.which("asar") is None:
+        raise RuntimeError(
+            "The `asar` CLI is required to patch the Linux ASAR safely.\n"
+            "Install it with: npm install -g asar"
+        )
+
+
 def looks_like_game(path: pathlib.Path) -> bool:
     """Check if the path looks like a Linux Happy Wheels installation."""
     if not path or not path.exists():
         return False
-    # Linux native port has start.bash and a game/ subdirectory.
     root_ok = (path / "start.bash").is_file() and (path / "game").is_dir()
-    # app.asar is in resources/ (could be at root or under game/).
     resources_ok = (
         (path / "resources" / "app.asar").is_file()
         or (path / "game" / "resources" / "app.asar").is_file()
@@ -43,8 +50,6 @@ def looks_like_game(path: pathlib.Path) -> bool:
 def find_game_root() -> pathlib.Path | None:
     """Locate the Linux Happy Wheels Steam folder."""
     home = pathlib.Path.home()
-    
-    # Standard Steam paths on Linux.
     steam_roots = [
         home / ".steam" / "steam" / "steamapps" / "common",
         home / ".local" / "share" / "Steam" / "steamapps" / "common",
@@ -53,17 +58,15 @@ def find_game_root() -> pathlib.Path | None:
         pathlib.Path("/var/lib/steam/steamapps/common"),
         pathlib.Path("/opt/steam/steamapps/common"),
     ]
-    
+
     seen: set[str] = set()
     for root in steam_roots:
         if root.exists():
-            # Look for folders named exactly "Happy Wheels".
             for candidate in sorted(root.glob("Happy Wheels")):
                 key = str(candidate.resolve())
                 if key not in seen and looks_like_game(candidate):
                     seen.add(key)
                     return candidate
-            # Also try partial matches.
             for candidate in sorted(root.glob("*Happy*Wheels*")):
                 key = str(candidate.resolve())
                 if key not in seen and looks_like_game(candidate):
@@ -85,125 +88,79 @@ def resolve_app_asar(game_root: pathlib.Path) -> pathlib.Path:
     raise FileNotFoundError(f"Could not find app.asar under {game_root}")
 
 
-def unpack_asar(blob: bytes) -> dict[str, bytes]:
-    """Unpack an Electron ASAR archive (packed files only)."""
-    size = struct.unpack_from("<I", blob, 4)[0]
-    length = struct.unpack_from("<I", blob, 12)[0]
-    header = json.loads(blob[16 : 16 + length])
-    result: dict[str, bytes] = {}
-
-    def walk(files, prefix=""):
-        for name, item in files.items():
-            path = prefix + name
-            if "files" in item:
-                walk(item["files"], path + "/")
-            elif not item.get("unpacked"):
-                start = 8 + size + int(item["offset"])
-                result[path] = blob[start : start + item["size"]]
-
-    walk(header["files"])
-    return result
+def extract_asar(app_asar: pathlib.Path, out_dir: pathlib.Path) -> None:
+    subprocess.run(["asar", "extract", str(app_asar), str(out_dir)], check=True)
 
 
-def pack_asar(files: dict[str, bytes]) -> bytes:
-    """Repack files into an Electron ASAR archive."""
-    import hashlib
-    
-    tree = {"files": {}}
-    body = bytearray()
-    for name, content in sorted(files.items()):
-        directory = tree["files"]
-        parts = name.split("/")
-        for part in parts[:-1]:
-            directory = directory.setdefault(part, {"files": {}})[ "files"]
-        block = 4194304
-        directory[parts[-1]] = {
-            "size": len(content),
-            "offset": str(len(body)),
-            "integrity": {
-                "algorithm": "SHA256",
-                "hash": hashlib.sha256(content).hexdigest(),
-                "blockSize": block,
-                "blocks": [
-                    hashlib.sha256(content[i : i + block]).hexdigest()
-                    for i in range(0, len(content), block)
-                ],
-            },
-        }
-        body.extend(content)
-    header = json.dumps(tree, separators=(",", ":")).encode()
-    padding = (-len(header)) % 4
-    pickle = struct.pack("<II", 4 + len(header) + padding, len(header)) + header + b"\0" * padding
-    return struct.pack("<II", 4, len(pickle)) + pickle + bytes(body)
+def pack_asar(src_dir: pathlib.Path, output_path: pathlib.Path) -> None:
+    subprocess.run(["asar", "pack", str(src_dir), str(output_path)], check=True)
 
 
 def patch_asar_inplace(app_asar: pathlib.Path) -> None:
-    """Patch app.asar in-place by replacing packed JS files.
-    
-    This preserves unpacked node_modules and ASAR structure integrity.
-    """
+    """Patch app.asar while preserving unpacked node_modules and native libraries."""
+    ensure_asar_cli()
+
     print(f"  Loading {app_asar.name}...")
-    payload = app_asar.read_bytes()
-    files = unpack_asar(payload)
-    
-    if "electron/out/main.js" not in files:
-        raise ValueError(
-            f"{app_asar} does not look like a Happy Wheels app.asar.\n"
-            "Please verify the game folder is the Linux Happy Wheels installation."
-        )
-    
-    main_path = "electron/out/main.js"
-    preload_path = "electron/out/preload.js"
-    
-    print(f"  Patching {main_path}...")
-    main = files[main_path].decode("utf-8", errors="replace")
-    preload = files[preload_path].decode("utf-8", errors="replace")
-    
-    # Inject the mod loader require into main.js if not present.
-    if 'require("./hw-mod-loader.js")' not in main and "require('./hw-mod-loader.js')" not in main:
-        main = main + '\nrequire("./hw-mod-loader.js");\n'
-    
-    # Inject boot script reference.
-    if '<script src="./js/hw-mod-boot.js">' not in main:
-        before = '<script src="./js/dependencies.js">'
-        if before in main:
-            main = main.replace(before, '<script src="./js/hw-mod-boot.js"><\\/script>' + before)
-    
-    # Inject mod-runtime preload into preload.js if not present.
-    if "mod-runtime/preload.cjs" not in preload:
-        preload = (
-            "(() => {\n"
-            "  try {\n"
-            "    require(require('path').join(process.resourcesPath, 'mod-runtime', 'preload.cjs'));\n"
-            "  } catch (e) {}\n"
-            "})();\n" + preload
-        )
-    
-    files[main_path] = main.encode("utf-8")
-    files[preload_path] = preload.encode("utf-8")
-    
-    # Add the loader and SDK files.
-    print(f"  Adding mod loader and SDK...")
-    loader_file = CORE_DIR / "mod-loader-main.cjs"
-    sdk_file = CORE_DIR / "hw-mod-sdk.js"
-    
-    if not loader_file.exists():
-        raise FileNotFoundError(f"Missing {loader_file}. Is the repo complete?")
-    if not sdk_file.exists():
-        raise FileNotFoundError(f"Missing {sdk_file}. Is the repo complete?")
-    
-    files["electron/out/hw-mod-loader.js"] = loader_file.read_bytes()
-    files["electron/out/hw-mod-sdk.js"] = sdk_file.read_bytes()
-    files["electron/out/hw-mod-boot.js"] = b"window.HW_MOD_CATALOG=[];\n"
-    
-    # Add minimal runtime files.
-    files["mod-runtime/preload.cjs"] = b"void 0;\n"
-    files["mod-runtime/mods.json"] = b"[]\n"
-    
-    print(f"  Repacking ASAR (preserving unpacked modules)...")
-    patched = pack_asar(files)
-    app_asar.write_bytes(patched)
-    print(f"  ✓ Patched.")
+    with tempfile.TemporaryDirectory(prefix="jhwml-asar-") as temp_dir:
+        temp_root = pathlib.Path(temp_dir)
+        unpack_dir = temp_root / "app"
+        extract_asar(app_asar, unpack_dir)
+
+        main_js = unpack_dir / "electron" / "out" / "main.js"
+        preload_js = unpack_dir / "electron" / "out" / "preload.js"
+        if not main_js.is_file() or not preload_js.is_file():
+            raise ValueError(
+                f"{app_asar} does not look like a Happy Wheels app.asar.\n"
+                "Please verify the game folder is the Linux Happy Wheels installation."
+            )
+
+        main = main_js.read_text(encoding="utf-8", errors="replace")
+        preload = preload_js.read_text(encoding="utf-8", errors="replace")
+
+        if 'require("./hw-mod-loader.js")' not in main and "require('./hw-mod-loader.js')" not in main:
+            main = main + '\nrequire("./hw-mod-loader.js");\n'
+
+        if '<script src="./js/hw-mod-boot.js">' not in main:
+            before = '<script src="./js/dependencies.js">'
+            if before in main:
+                main = main.replace(before, '<script src="./js/hw-mod-boot.js"><\\/script>' + before)
+
+        if "mod-runtime/preload.cjs" not in preload:
+            preload = (
+                "(() => {\n"
+                "  try {\n"
+                "    require(require('path').join(process.resourcesPath, 'mod-runtime', 'preload.cjs'));\n"
+                "  } catch (e) {}\n"
+                "})();\n" + preload
+            )
+
+        main_js.write_text(main, encoding="utf-8")
+        preload_js.write_text(preload, encoding="utf-8")
+
+        loader_file = CORE_DIR / "mod-loader-main.cjs"
+        sdk_file = CORE_DIR / "hw-mod-sdk.js"
+        if not loader_file.exists():
+            raise FileNotFoundError(f"Missing {loader_file}. Is the repo complete?")
+        if not sdk_file.exists():
+            raise FileNotFoundError(f"Missing {sdk_file}. Is the repo complete?")
+
+        (unpack_dir / "electron" / "out" / "hw-mod-loader.js").write_bytes(loader_file.read_bytes())
+        (unpack_dir / "electron" / "out" / "hw-mod-sdk.js").write_bytes(sdk_file.read_bytes())
+        (unpack_dir / "electron" / "out" / "hw-mod-boot.js").write_bytes(b"window.HW_MOD_CATALOG=[];\n")
+
+        runtime_dir = unpack_dir / "mod-runtime"
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        (runtime_dir / "preload.cjs").write_bytes(b"void 0;\n")
+        (runtime_dir / "mods.json").write_bytes(b"[]\n")
+
+        # Use the Node ASAR packer so unpacked native modules remain untouched.
+        repacked = temp_root / "patched.asar"
+        pack_asar(unpack_dir, repacked)
+
+        # Move the patched archive over the original.
+        temp_backup = app_asar.with_suffix(app_asar.suffix + ".tmp")
+        shutil.copy2(str(repacked), str(temp_backup))
+        temp_backup.replace(app_asar)
 
 
 def install_linux(game_root: pathlib.Path | None = None, force: bool = False) -> pathlib.Path:
@@ -211,7 +168,7 @@ def install_linux(game_root: pathlib.Path | None = None, force: bool = False) ->
     if game_root is None:
         print("Searching for Happy Wheels...")
         game_root = find_game_root()
-    
+
     if game_root is None:
         raise FileNotFoundError(
             "Could not locate the Happy Wheels Linux installation.\n\n"
@@ -221,18 +178,18 @@ def install_linux(game_root: pathlib.Path | None = None, force: bool = False) ->
             "Alternatively, pass the path as an argument:\n"
             f"  python3 {pathlib.Path(__file__).name} /path/to/Happy/Wheels"
         )
-    
+
     print(f"Found Happy Wheels at: {game_root}")
-    
+
     if not looks_like_game(game_root):
         raise ValueError(
             f"{game_root} does not look like the Linux Happy Wheels install.\n"
             "Expected to find start.bash and a game/ subdirectory."
         )
-    
+
     app_asar = resolve_app_asar(game_root)
     backup = app_asar.with_suffix(app_asar.suffix + ".backup")
-    
+
     if backup.exists() and not force:
         print(
             f"\n⚠ Backup already exists: {backup.relative_to(game_root)}\n"
@@ -243,14 +200,14 @@ def install_linux(game_root: pathlib.Path | None = None, force: bool = False) ->
             f"  3. Run Steam 'Verify Integrity' and retry.\n"
         )
         return game_root
-    
+
     print(f"\nBacking up app.asar...")
     shutil.copy2(app_asar, backup)
     print(f"  ✓ Saved to: {backup.relative_to(game_root)}")
-    
+
     print(f"\nPatching app.asar...")
     patch_asar_inplace(app_asar)
-    
+
     print(f"\nSetting up mods directory...")
     mods_dir = game_root / "mods"
     mods_dir.mkdir(parents=True, exist_ok=True)
@@ -262,14 +219,13 @@ def install_linux(game_root: pathlib.Path | None = None, force: bool = False) ->
         encoding="utf-8",
     )
     print(f"  ✓ Mods folder ready at: {mods_dir.relative_to(game_root)}")
-    
-    print(f"\nSetting up mod runtime...")
+
     runtime_dir = game_root / "resources" / "mod-runtime"
     runtime_dir.mkdir(parents=True, exist_ok=True)
     (runtime_dir / "preload.cjs").write_text("void 0;\n", encoding="utf-8")
     (runtime_dir / "mods.json").write_text("[]\n", encoding="utf-8")
     print(f"  ✓ Runtime files installed.")
-    
+
     return game_root
 
 
@@ -288,29 +244,14 @@ def main() -> int:
                 Reinstall, overwriting any existing backup.
         """),
     )
-    parser.add_argument(
-        "path",
-        nargs="?",
-        type=pathlib.Path,
-        help="Path to the Happy Wheels installation (auto-detected if omitted)",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Overwrite existing backup and reinstall",
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"%(prog)s {VERSION}",
-    )
-    
+    parser.add_argument("path", nargs="?", type=pathlib.Path, help="Path to the Happy Wheels installation")
+    parser.add_argument("--force", action="store_true", help="Overwrite existing backup and reinstall")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+
     args = parser.parse_args()
-    
     try:
         game_root = args.path.resolve() if args.path else find_game_root()
         installed = install_linux(game_root, force=args.force)
-        
         print(f"\n" + "=" * 60)
         print(f"Installation complete!")
         print(f"\nGame folder: {installed}")
@@ -323,7 +264,6 @@ def main() -> int:
         print(f"Discord: https://discord.gg/XcZePBgDBJ")
         print(f"=" * 60)
         return 0
-    
     except KeyboardInterrupt:
         print(f"\n✗ Cancelled by user.")
         return 130
