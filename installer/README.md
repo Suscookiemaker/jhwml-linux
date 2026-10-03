@@ -1,28 +1,116 @@
-# JHWML - Mod Launcher
+# JHWML - Mod Launcher (Linux)
 
-A desktop installer for friends who do not have Python or Node. It patches Happy Wheels once with a core mod loader and can seed **Jimbob's Multiplayer Mod**. After that, drop a folder into `mods` and restart the game. A Steam update or “Verify files” can remove the loader; run the installer again only then.
+Installs the JHWML mod loader into the Linux Happy Wheels 1.99.2 installation.
 
-Other developers: [docs/index.md](../docs/index.md). Public launcher repo: [github.com/MathewRegier/jhwml](https://github.com/MathewRegier/jhwml). Discord: [https://discord.gg/XcZePBgDBJ](https://discord.gg/XcZePBgDBJ).
+## Installation
 
-## Build the .exe
+Run the installer script from the project root:
 
-From the project root:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File installer\build.ps1
+```bash
+python3 installer/linux_install.py
 ```
 
-The exe is written to:
+The script will:
+1. Auto-detect your Happy Wheels folder (or accept a path)
+2. Back up the original `app.asar`
+3. Patch it with the mod loader
+4. Create a `mods/` directory
+5. Set up runtime files
 
-`dist\JHWML - Mod Launcher.exe`
+## Manual installation
 
-Send that one file. It is self-contained. The first launch can take a few seconds while it unpacks.
+If you prefer to specify the game folder:
 
-## What friends do
+```bash
+python3 installer/linux_install.py /home/user/.steam/steam/steamapps/common/Happy\ Wheels
+```
 
-1. Keep Steam and Happy Wheels 1.99 installed. Close the game first.
-2. Double-click **JHWML - Mod Launcher**. If install fails on permissions, right-click and run as administrator.
-3. Confirm the Steam game folder (browse if it was not found).
-4. Check **Jimbob's Multiplayer Mod**.
-5. Install, then Play from the launcher or from Steam. Steam should stay running.
-6. Later mod updates: replace the folder in `Happy Wheels\mods` and restart the game. You do not need a new launcher.
+Or pass `--force` to reinstall even if a backup exists:
+
+```bash
+python3 installer/linux_install.py --force
+```
+
+## Launching the game
+
+1. **From Steam:** Just launch Happy Wheels normally.
+2. **From the launcher script:** Copy `installer/linux_launcher.sh` to your game folder and run it:
+   ```bash
+   cp installer/linux_launcher.sh ~/.steam/steam/steamapps/common/Happy\ Wheels/
+   chmod +x ~/.steam/steam/steamapps/common/Happy\ Wheels/linux_launcher.sh
+   ./linux_launcher.sh
+   ```
+3. **From the command line:**
+   ```bash
+   cd ~/.steam/steam/steamapps/common/Happy\ Wheels/
+   ./start.bash
+   ```
+
+## Installing mods
+
+After patching:
+
+1. Create a folder for your mod in `Happy Wheels/mods/`
+2. Add a `mod.json` file and your mod code
+3. Restart Happy Wheels to load it
+
+Example structure:
+```
+Happy Wheels/mods/
+├── my-awesome-mod/
+│   ├── mod.json
+│   ├── main.js
+│   ├── web/
+│   │   └── index.html
+│   └── assets/
+│       └── image.png
+```
+
+For detailed mod development docs, see: https://mathewregier.github.io/jhwml/
+
+## Uninstalling / Restoring
+
+The installer automatically backs up your original `app.asar` to `app.asar.backup`.
+
+To restore the unmodded version:
+
+```bash
+cd ~/.steam/steam/steamapps/common/Happy\ Wheels/resources/
+rm app.asar
+mv app.asar.backup app.asar
+```
+
+Or let Steam verify the game files:
+
+```
+Steam > Library > Happy Wheels > Properties > Local Files > Verify integrity
+```
+
+Then reinstall the loader when ready.
+
+## Troubleshooting
+
+**"Could not find app.asar"**
+- Make sure Happy Wheels is installed to the standard Steam folder
+- Try specifying the path manually
+
+**"Backup already exists"**
+- The game was already patched, or an install failed
+- Use `--force` to reinstall
+- Or restore from backup first (see Uninstalling above)
+
+**Mods not loading**
+- Restart the game after adding/updating a mod
+- Check that your `mod.json` is valid JSON
+- Verify the mod folder is in `Happy Wheels/mods/`
+
+**Game won't start**
+- The ASAR may be corrupted
+- Restore from `app.asar.backup` or verify game files
+- Reinstall the loader
+
+## Help
+
+- **Mod development:** https://mathewregier.github.io/jhwml/
+- **Discord:** https://discord.gg/XcZePBgDBJ
+- **GitHub:** https://github.com/Suscookiemaker/jhwml-linux
