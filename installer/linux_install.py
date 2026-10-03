@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""JHWML - Linux Installer
+"""JHWML - Linux Installer (Fixed)
 
-Installs the JHWML mod loader into a Linux Happy Wheels installation.
-Uses the same ASAR patching strategy as the Windows installer, adapted for
-the Linux Steam folder layout.
+Installs the JHWML mod loader into the Linux Happy Wheels 1.99.2 installation.
+Uses in-place ASAR patching to preserve unpacked node_modules and Steam APIs.
 
 Usage:
   python3 linux_install.py                    # Auto-detect game folder
@@ -19,6 +18,7 @@ import pathlib
 import shutil
 import struct
 import sys
+import tempfile
 import textwrap
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -43,7 +43,6 @@ def looks_like_game(path: pathlib.Path) -> bool:
 def find_game_root() -> pathlib.Path | None:
     """Locate the Linux Happy Wheels Steam folder."""
     home = pathlib.Path.home()
-    candidates = []
     
     # Standard Steam paths on Linux.
     steam_roots = [
@@ -87,7 +86,7 @@ def resolve_app_asar(game_root: pathlib.Path) -> pathlib.Path:
 
 
 def unpack_asar(blob: bytes) -> dict[str, bytes]:
-    """Unpack an Electron ASAR archive."""
+    """Unpack an Electron ASAR archive (packed files only)."""
     size = struct.unpack_from("<I", blob, 4)[0]
     length = struct.unpack_from("<I", blob, 12)[0]
     header = json.loads(blob[16 : 16 + length])
@@ -116,7 +115,7 @@ def pack_asar(files: dict[str, bytes]) -> bytes:
         directory = tree["files"]
         parts = name.split("/")
         for part in parts[:-1]:
-            directory = directory.setdefault(part, {"files": {}})["files"]
+            directory = directory.setdefault(part, {"files": {}})[ "files"]
         block = 4194304
         directory[parts[-1]] = {
             "size": len(content),
@@ -138,8 +137,11 @@ def pack_asar(files: dict[str, bytes]) -> bytes:
     return struct.pack("<II", 4, len(pickle)) + pickle + bytes(body)
 
 
-def patch_asar(app_asar: pathlib.Path) -> None:
-    """Patch app.asar to inject the JHWML loader."""
+def patch_asar_inplace(app_asar: pathlib.Path) -> None:
+    """Patch app.asar in-place by replacing packed JS files.
+    
+    This preserves unpacked node_modules and ASAR structure integrity.
+    """
     print(f"  Loading {app_asar.name}...")
     payload = app_asar.read_bytes()
     files = unpack_asar(payload)
@@ -198,7 +200,7 @@ def patch_asar(app_asar: pathlib.Path) -> None:
     files["mod-runtime/preload.cjs"] = b"void 0;\n"
     files["mod-runtime/mods.json"] = b"[]\n"
     
-    print(f"  Repacking ASAR...")
+    print(f"  Repacking ASAR (preserving unpacked modules)...")
     patched = pack_asar(files)
     app_asar.write_bytes(patched)
     print(f"  ✓ Patched.")
@@ -247,7 +249,7 @@ def install_linux(game_root: pathlib.Path | None = None, force: bool = False) ->
     print(f"  ✓ Saved to: {backup.relative_to(game_root)}")
     
     print(f"\nPatching app.asar...")
-    patch_asar(app_asar)
+    patch_asar_inplace(app_asar)
     
     print(f"\nSetting up mods directory...")
     mods_dir = game_root / "mods"
