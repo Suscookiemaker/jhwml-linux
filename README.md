@@ -12,7 +12,7 @@ Other developers: start at [Your first mod](docs/first-mod.md), then [Make a mod
 
 ## Requirements
 
-- Windows
+- Linux
 - [Python 3](https://www.python.org/downloads/) with **Add python.exe to PATH** (to run from source or build the EXE)
 - A legal Steam copy of Happy Wheels 1.99.2
 - Close Happy Wheels before installing
